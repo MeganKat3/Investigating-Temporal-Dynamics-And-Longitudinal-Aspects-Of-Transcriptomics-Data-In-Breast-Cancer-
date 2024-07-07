@@ -1,0 +1,335 @@
+---
+title: "Survival_Longitudinal"
+output: html_document
+date: "2024-04-05"
+---
+
+```{r}
+library("TCGAbiolinks")
+library(DESeq2)
+library(SummarizedExperiment)
+library(nlme)
+library(survival)
+library(JM)
+library(lattice)
+library(dplyr)
+```
+
+```{r}
+query <- TCGAbiolinks::GDCquery(
+  project = "TCGA-BRCA",
+  data.category = "Transcriptome Profiling",
+  data.type = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts",
+  experimental.strategy = "RNA-Seq",
+  sample.type = c("Primary Tumor")
+)
+TCGAbiolinks::GDCdownload(query = query, method = "api")
+dat <- TCGAbiolinks::GDCprepare(query = query)
+SummarizedExperiment::assays(dat)$unstranded[1:5, 1:2]
+
+meta <- colData(dat)[, c("project_id", "submitter_id", "age_at_diagnosis", "ethnicity", "gender", "days_to_death", "days_to_last_follow_up", "vital_status", "paper_BRCA_Subtype_PAM50", "treatments")]
+meta$treatments <- unlist(lapply(meta$treatments, function(xx) {
+  any(xx$treatment_or_therapy == "yes")
+}))
+
+dds <- DESeq2::DESeqDataSetFromMatrix(assays(dat)$unstranded, colData = meta, design = ~1)
+dds2 <- DESeq2::estimateSizeFactors(dds)
+RNA_count <- DESeq2::counts(dds2, normalized = TRUE)
+RNA_count[1:5, 1:2]
+meta$time <- apply(meta[, c("days_to_death", "days_to_last_follow_up")], 1, max, na.rm = TRUE) / 365.25
+meta$status <- meta$vital_status
+meta$age <- meta$age_at_diagnosis / 365.25
+clin <- subset(meta, !duplicated(submitter_id) & time > 0 )
+clin <- clin[order(clin$submitter_id), ]
+RNA_count <- RNA_count[, rownames(clin)]
+clin$status[clin$status == "Dead"] <- 1
+clin$status[clin$status == "Alive"] <- 0
+clin$status <- as.numeric(clin$status)
+sfit <- survival::survfit(Surv(time, status) ~ 1, data = clin)
+sfit2 <- survfit(Surv(time, status) ~ treatments, data = clin)
+fit_cox <- coxph(Surv(time, status) ~ age, data = clin)
+fit_cox_spline <- coxph(Surv(time, status) ~ pspline(age), data = clin)
+
+meta$time <- apply(meta[, c("days_to_death", "days_to_last_follow_up")], 1, max, na.rm = TRUE) / 365.25
+meta$status <- meta$vital_status
+meta$age <- meta$age_at_diagnosis / 365.25
+clin <- subset(meta, gender == "female" & !duplicated(submitter_id) & time > 0 & !is.na(age))
+clin <- clin[order(clin$submitter_id), ]
+RNA_count <- RNA_count[, rownames(clin)]
+names(meta)[names(meta) == "submitter_id"] <- "sample_id"
+```
+
+```{r}
+df <- as.data.frame(t(assays(dat)$unstranded))
+dim(df)
+metadata <- as.data.frame(colData(dat))
+library(dplyr)
+library(tibble)
+df <- rownames_to_column(df, var = "sample_id")
+metadata <- rownames_to_column(metadata[,-9], var = "sample_id")#the sample_id is added as a new column to both the gene expression data df and the #metadata metadata.
+merged_df <- as.data.frame(merge(metadata, df, by = "sample_id", all.x = TRUE)) #The merge() function combines metadata and df based on the common column #sample_id, keeping all rows from metadata (all.x = TRUE).
+merged_df_no_na <- replace(merged_df, is.na(merged_df), NA)
+# Identify constant columns (including NA values)
+constant_columns <- sapply(merged_df_no_na, function(x) length(unique(na.omit(x))) <= 1)
+# Remove constant columns
+merged_df <- merged_df[, !constant_columns]
+# Count the frequency of each patient value
+patient_frequency <- table(merged_df$patient)
+# Identify patient values with frequency greater than 1
+valid_patients <- names(patient_frequency[patient_frequency > 1])
+# Filter the data frame to keep only rows with valid patient values
+filtered_df <- merged_df %>%
+  filter(patient %in% valid_patients)
+```
+
+
+100 genes 
+```{r}
+# library(readr)
+
+
+merged_df1<-merged_df[,c("vital_status","days_to_last_follow_up","age_at_diagnosis","ENSG00000000003.15","patient","days_to_collection")]
+merged_df1<-na.omit(merged_df1)
+#duplicate
+keep_patient<-merged_df1 %>%
+  dplyr::count(patient) %>%
+  filter(n > 1) %>%
+  dplyr::select(patient) %>%
+  unlist()
+merged_df1<-merged_df1 %>%
+  filter(patient %in% keep_patient)
+merged_df1$status[merged_df1$vital_status == "Dead"] <- 1 
+merged_df1$status[merged_df1$vital_status == "Alive"] <- 0
+cox_df<-merged_df1 %>%
+  group_by(patient) %>%
+  summarise(vital_status=mean(status),days_to_last_follow_up=mean(days_to_last_follow_up),
+            age_at_diagnosis=mean(age_at_diagnosis))
+
+small_df <- as.data.frame(filtered_df[,c(1:162)[-15]])
+write.table(small_df, "~/Desktop/100Genes.tsv", sep = "\t", row.names = FALSE)
+
+
+# Write the flattened data frame to a tab-delimited file
+# write.table(flattened_df, "output_file.tsv", sep = "\t", row.names = FALSE) ####################
+```
+
+OLD CODE
+```{r}
+
+lme_outputs <- list()
+# Loop through the last 100 numeric variables
+for (variable_name in names(small_df)[(length(small_df) - 98):length(small_df)]) {
+  # Construct the formula for lme
+  formula <- as.formula(paste(variable_name, "~ days_to_collection * age_at_diagnosis"))
+
+  tryCatch({
+    # Run lme and store the output in the list
+    lme_outputs[[variable_name]] <- lme(
+      formula,
+      random = ~ days_to_collection | patient,
+      data = small_df,
+      control = lmeControl(opt = "optim", maxIter = 1000)
+    )
+  }, error = function(e) {
+    cat("Error for variable:", variable_name, "\n")
+    print(e)
+    lme_outputs[[variable_name]] <- NULL
+  })
+}
+
+
+fitLME <- lme(
+  ENSG00000000003.15 ~ days_to_collection *age_at_diagnosis,
+  random = ~ days_to_collection | patient,
+  data = merged_df1,
+  #method = "ML",
+  control = lmeControl(opt = "optim", maxIter = 1000)
+)
+fitLME
+```
+
+
+
+UPDATED Loop 100 genes + with JM and LME
+```{r}
+# Assuming you have 100 genes
+
+# Create an empty data frame with the required columns
+output <- data.frame(matrix(nrow = 0, ncol = 9))
+colnames(output) <- c("gene", "coeff_age", "coeff_time", "coeff_age:time",
+                      "p_value_age", "p_value_time", "p_value_age:time", "p_value_intercept", "p_value_residual")
+outputJM <- data.frame(matrix(nrow = 0, ncol = 9))
+colnames(outputJM) <- c("gene", "coeff_age", "coeff_time", "coeff_age:time",
+                      "p_value_age", "p_value_time", "p_value_age:time", "p_value_intercept", "p_value_residual")
+
+fitCOX <- coxph(
+  Surv(age_at_diagnosis, vital_status) ~ days_to_last_follow_up,
+ # cluster=patient,
+  data = cox_df,
+ # model=TRUE,
+  x= TRUE
+)
+# Loop through the last 100 numeric variables
+for (variable_name in names(small_df)[(length(small_df) - 98):length(small_df)]) {
+  # Construct the formula for lme
+  formula <- as.formula(paste(variable_name, "~ days_to_collection * age_at_diagnosis"))
+
+  tryCatch({
+    # Run lme and store the output in the list
+    out <- lme(
+      formula,
+      random = ~ days_to_collection | patient,
+      data = small_df,
+      control = lmeControl(opt = "optim", maxIter = 1000)
+    )
+    # Extract coefficients and p-values
+    coef <- summary(out)$tTable[, "Value"]
+    p_values <- summary(out)$tTable[, "p-value"]
+
+    # Store coefficients and p-values in the output data frame
+    output <- rbind(output, c(paste0("gene_", variable_name), coef, p_values))
+  }, error = function(e) {
+    cat("Error for variable:", variable_name, "\n")
+    print(e)
+  })
+  fit.JMB <- jointModelBayes(out, fitCOX, timeVar = "days_to_collection",n.ite=1000000)
+  coefJM <- summary(fit.JMB)[[1]][, "Value"]
+  p_valuesJM <- summary(fit.JMB)[[1]][, "P"]
+
+    # Store coefficients and p-values in the output data frame
+    outputJM <- rbind(outputJM, c(paste0("gene_", variable_name), coefJM, p_valuesJM))
+
+
+}
+
+colnames(output) <- c("gene", "intercept", "days_to_collection", "age_at_diagnosis","days_to_collection:age_at_diagnosis","p_value_intercept", "p_value_time", "p_value_age", "p_value_time:age")
+
+```
+
+
+This code is the loop with 97 obs and 9 variables 
+```{r}
+# Assuming you have 100 genes
+
+# Create an empty data frame with the required columns
+output <- data.frame(matrix(nrow = 0, ncol = 9))
+colnames(output) <- c("gene", "coeff_age", "coeff_time", "coeff_age:time",
+                      "p_value_age", "p_value_time", "p_value_age:time", "p_value_intercept", "p_value_residual")
+
+# Loop through the last 100 numeric variables
+for (variable_name in names(small_df)[(length(small_df) - 98):length(small_df)]) {
+  # Construct the formula for lme
+  formula <- as.formula(paste(variable_name, "~ days_to_collection "))
+
+  tryCatch({
+    # Run lme and store the output in the list
+    out <- lme(
+      formula,
+      random = ~ days_to_collection | patient,
+      data = small_df,
+      control = lmeControl(opt = "optim", maxIter = 1000)
+    )
+    # Extract coefficients and p-values
+    coef <- summary(out)$tTable[, "Value"]
+    p_values <- summary(out)$tTable[, "p-value"]
+
+    # Store coefficients and p-values in the output data frame
+    output <- rbind(output0, c(paste0("gene_", variable_name), coef, p_values))
+  }, error = function(e) {
+    cat("Error for variable:", variable_name, "\n")
+    print(e)
+  })
+}
+
+colnames(output) <- c("gene", "intercept", "days_to_collection", "age_at_diagnosis","days_to_collection:age_at_diagnosis","p_value_intercept", "p_value_time", "p_value_age", "p_value_time:age")
+
+```
+
+SCATTER PLOT 2 GENES
+```{r}
+library(ggplot2)
+library(hrbrthemes)
+
+plot(small_df$days_to_collection,small_df$gene_ENSG00000004139.14,xlab="Days to collection",ylab="Gene Abudance")
+plot(small_df$days_to_collection,small_df$gene_ENSG00000004534.15,xlab="Days to collection",ylab="Gene Abundace")
+
+library(gridExtra)
+
+#44
+p_gene1 <- ggplot(small_df, aes(x = days_to_collection, y = ENSG00000004139.14)) +
+  geom_point(color = "blue") +
+   geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  labs(x = "Days to collection", y = "Gene Abundance") +
+  ggtitle("Gene ENSG00000004139.1") +
+  theme_ipsum()
+ # Adjust the size here
+
+
+p_gene1 + geom_abline(intercept = 117.62564  , slope = 0.32286, color = "green")
+
+
+#51
+p_gene2 <- ggplot(small_df, aes(x = days_to_collection, y = ENSG00000004534.15)) +
+  geom_point(color = "blue") +
+   geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  labs(x = "Days to collection", y = "Gene Abundance") +
+  ggtitle("Gene ENSG00000004534.15") +
+  theme_ipsum()
+
+p_gene2 + geom_abline(intercept = 3654.307, slope = 1.245 , color = "green")
+
+
+ggsave(file.path("~/Users/Desktop/p_gene1.pdf"), plot = p_gene1, width = 8, height = 6)
+
+grid.arrange(p_gene1, p_gene2, ncol = 2, widths = c(2000, 2000))
+
+
+
+
+```
+
+
+Joint Model
+```{r}
+library(JMbayes)
+fit.JMB <- jointModelBayes(fitLME, fitCOX, timeVar = "days_to_collection",n.ite=50000)
+
+ fitLME <- lme(
+      ENSG00000000457.14~ days_to_collection * age_at_diagnosis,
+      random = ~ days_to_collection | patient,
+      data = small_df,
+      control = lmeControl(opt = "optim", maxIter = 1000)
+    )
+ 
+ fitCOX <- coxph(
+  Surv(age_at_diagnosis, vital_status) ~ days_to_last_follow_up,
+ # cluster=patient,
+  data = cox_df,
+ # model=TRUE,
+  x= TRUE
+)
+
+summary(fit.JMB)
+```
+
+
+Joint Model Simple Linear Model 
+```{r}
+
+plot(small_df$age_at_diagnosis,small_df$gene_ENSG00000000457.14,xlab="Age to Diagnosis",ylab="Gene Abundace")
+
+p_gene3 <- ggplot(small_df, aes(x = age_at_diagnosis, y = ENSG00000000457.14))+
+  geom_point(color = "blue") +
+   geom_smooth(method=lm , color="red", fill="#69b3a2", se=TRUE) +
+  labs(x = "Age_to_Diagnosis", y = "Gene Abundance") +
+  ggtitle("Gene ENSG00000000457.14") +
+  theme_ipsum()
+ # Adjust the size here
+ 
+
+
+p_gene3 + geom_abline(intercept = -0.0625, slope = 0.1767, color = "green")
+
+
+```
