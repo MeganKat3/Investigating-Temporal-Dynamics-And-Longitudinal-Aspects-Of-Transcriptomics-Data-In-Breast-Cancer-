@@ -114,43 +114,6 @@ write.table(small_df, "~/Desktop/100Genes.tsv", sep = "\t", row.names = FALSE)
 # write.table(flattened_df, "output_file.tsv", sep = "\t", row.names = FALSE) ####################
 ```
 
-OLD CODE
-```{r}
-
-lme_outputs <- list()
-# Loop through the last 100 numeric variables
-for (variable_name in names(small_df)[(length(small_df) - 98):length(small_df)]) {
-  # Construct the formula for lme
-  formula <- as.formula(paste(variable_name, "~ days_to_collection * age_at_diagnosis"))
-
-  tryCatch({
-    # Run lme and store the output in the list
-    lme_outputs[[variable_name]] <- lme(
-      formula,
-      random = ~ days_to_collection | patient,
-      data = small_df,
-      control = lmeControl(opt = "optim", maxIter = 1000)
-    )
-  }, error = function(e) {
-    cat("Error for variable:", variable_name, "\n")
-    print(e)
-    lme_outputs[[variable_name]] <- NULL
-  })
-}
-
-
-fitLME <- lme(
-  ENSG00000000003.15 ~ days_to_collection *age_at_diagnosis,
-  random = ~ days_to_collection | patient,
-  data = merged_df1,
-  #method = "ML",
-  control = lmeControl(opt = "optim", maxIter = 1000)
-)
-fitLME
-```
-
-
-
 UPDATED Loop 100 genes + with JM and LME
 ```{r}
 # Assuming you have 100 genes
